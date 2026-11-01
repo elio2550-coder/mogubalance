@@ -924,8 +924,8 @@ meals: [
   ]
 }}
 """
-    # 混雑自動回避のためのフォールバックモデル一覧（安定稼働モデル群）
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    # Google現行公式モデル（主力: 3.8-flash / 予備: 3.5-flash-lite）
+    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
     last_err = ""
     client = genai.Client(api_key=api_key)
 
@@ -952,7 +952,7 @@ meals: [
                     time.sleep(1.2)  # 一時混雑時は1.2秒待機してリトライ
                     continue
                 else:
-                    break  # モデル未対応等の場合は即座に次の予備モデルへバトンタッチ
+                    break  # 次の予備モデルへバトンタッチ
 
     return {"error": f"AIサーバー混雑エラー: Google側が一時的に混雑しています。少し時間をおいて再度お試しください。（詳細: {last_err}）"}
 
@@ -975,7 +975,7 @@ def get_rescue_suggestion(api_key: str):
 
 親しみやすく端的な箇条書きで、製品名・推定PFC・選んだ理由を教えてください。
 """
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
     client = genai.Client(api_key=api_key)
     last_err = ""
 
