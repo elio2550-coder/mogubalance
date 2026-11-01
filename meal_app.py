@@ -924,24 +924,37 @@ meals: [
   ]
 }}
 """
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2
-            )
-        )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-        return json.loads(raw)
-    except Exception as e:
-        return {"error": f"解析エラー: {str(e)}"}
+    # 混雑自動回避のためのフォールバックモデル一覧（安定稼働モデル群）
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    last_err = ""
+    client = genai.Client(api_key=api_key)
+
+    for m_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=m_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2
+                    )
+                )
+                raw = response.text.strip()
+                if raw.startswith("```"):
+                    raw = raw.strip("`")
+                    if raw.startswith("json"):
+                        raw = raw[4:].strip()
+                return json.loads(raw)
+            except Exception as e:
+                last_err = str(e)
+                if any(k in last_err for k in ["503", "429", "demand", "UNAVAILABLE", "ResourceExhausted"]):
+                    time.sleep(1.2)  # 一時混雑時は1.2秒待機してリトライ
+                    continue
+                else:
+                    break  # モデル未対応等の場合は即座に次の予備モデルへバトンタッチ
+
+    return {"error": f"AIサーバー混雑エラー: Google側が一時的に混雑しています。少し時間をおいて再度お試しください。（詳細: {last_err}）"}
 
 def get_rescue_suggestion(api_key: str):
     rem_p = max(targets["protein"] - current_total["protein"], 0)
@@ -962,15 +975,27 @@ def get_rescue_suggestion(api_key: str):
 
 親しみやすく端的な箇条書きで、製品名・推定PFC・選んだ理由を教えてください。
 """
-    try:
-        client = genai.Client(api_key=api_key)
-        res = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
-        )
-        return res.text
-    except Exception as e:
-        return f"提案の取得に失敗しました: {e}"
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+    client = genai.Client(api_key=api_key)
+    last_err = ""
+
+    for m_name in models_to_try:
+        for attempt in range(2):
+            try:
+                res = client.models.generate_content(
+                    model=m_name,
+                    contents=prompt
+                )
+                return res.text
+            except Exception as e:
+                last_err = str(e)
+                if any(k in last_err for k in ["503", "429", "demand", "UNAVAILABLE", "ResourceExhausted"]):
+                    time.sleep(1.2)
+                    continue
+                else:
+                    break
+
+    return f"提案の取得に失敗しました（一時混雑中）: {last_err}"
 
 # -------------------------------------------------------------
 # 7. メイン画面ヘッダー ＆ ストリーク（連続記録）バナー
