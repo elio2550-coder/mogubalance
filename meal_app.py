@@ -3,6 +3,7 @@ import json
 import html
 import hmac
 import time
+import threading
 from datetime import datetime, date, timedelta
 import streamlit as st
 import streamlit.components.v1 as components
@@ -31,6 +32,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 PROFILE_FILE = os.path.join(DATA_DIR, "profile.json")
+BG_RESULTS_FILE = os.path.join(DATA_DIR, "bg_results.json")
 
 # ページ基本設定
 st.set_page_config(
@@ -852,6 +854,24 @@ if st.sidebar.button("🔒 アプリを施錠（ログアウト）", use_contain
     st.session_state.authenticated = False
     st.rerun()
 
+# バックグラウンド解析結果の自動反映（画面を開いたとき・再読込時に未回収分を回収）
+def check_and_apply_bg_results():
+    if os.path.exists(BG_RESULTS_FILE):
+        try:
+            with open(BG_RESULTS_FILE, "r", encoding="utf-8") as f:
+                bg_meals = json.load(f)
+            if bg_meals and isinstance(bg_meals, list) and len(bg_meals) > 0:
+                st.session_state.meals.extend(bg_meals)
+                with open(BG_RESULTS_FILE, "w", encoding="utf-8") as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+                st.toast("🎉 バックグラウンド解析が完了し、本日の記録に自動追加されました！")
+                return True
+        except Exception:
+            pass
+    return False
+
+check_and_apply_bg_results()
+
 # -------------------------------------------------------------
 # 5. 集計ロジック
 # -------------------------------------------------------------
@@ -924,8 +944,8 @@ meals: [
   ]
 }}
 """
-    # Google現行公式モデル（主力: 3.8-flash / 予備: 3.5-flash-lite）
-    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    # Google現行公式モデル（超高速最優先: 3.5-flash-lite / 予備: 3.8-flash）
+    models_to_try = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
     last_err = ""
     client = genai.Client(api_key=api_key)
 
@@ -956,6 +976,57 @@ meals: [
 
     return {"error": f"AIサーバー混雑エラー: Google側が一時的に混雑しています。少し時間をおいて再度お試しください。（詳細: {last_err}）"}
 
+# -------------------------------------------------------------
+# 6.1 バックグラウンド解析ワーカー & 回収ロジック（画面を閉じても実行）
+# -------------------------------------------------------------
+def process_meal_background(text: str, fallback_cat: str, api_key: str):
+    res = analyze_meal_fast(text, fallback_cat, api_key)
+    if "error" not in res:
+        meals_list = res.get("meals", [])
+        if not meals_list and "items" in res:
+            meals_list = [res]
+        
+        now_str = datetime.now().strftime("%H:%M")
+        completed_entries = []
+        for m_entry in meals_list:
+            cat_raw = m_entry.get("category", fallback_cat)
+            if "朝" in cat_raw:
+                cat_final = "朝食"
+            elif "昼" in cat_raw or "ランチ" in cat_raw:
+                cat_final = "昼食"
+            elif "夕" in cat_raw or "夜" in cat_raw or "晩" in cat_raw:
+                cat_final = "夕食"
+            else:
+                cat_final = "間食"
+
+            summary_txt = m_entry.get("summary_text", "").strip()
+            if not summary_txt:
+                summary_txt = text
+
+            completed_entries.append({
+                "time": now_str,
+                "category": cat_final,
+                "input": summary_txt,
+                "result": {
+                    "detected_category": cat_final,
+                    "items": m_entry.get("items", []),
+                    "total": m_entry.get("total", {}),
+                    "judgment": m_entry.get("judgment", "分析完了"),
+                    "comment": m_entry.get("comment", "")
+                }
+            })
+
+        try:
+            existing_bg = []
+            if os.path.exists(BG_RESULTS_FILE):
+                with open(BG_RESULTS_FILE, "r", encoding="utf-8") as f:
+                    existing_bg = json.load(f)
+            existing_bg.extend(completed_entries)
+            with open(BG_RESULTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(existing_bg, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving bg results: {e}")
+
 def get_rescue_suggestion(api_key: str):
     rem_p = max(targets["protein"] - current_total["protein"], 0)
     rem_f = max(targets["fat"] - current_total["fat"], 0)
@@ -975,7 +1046,7 @@ def get_rescue_suggestion(api_key: str):
 
 親しみやすく端的な箇条書きで、製品名・推定PFC・選んだ理由を教えてください。
 """
-    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    models_to_try = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
     client = genai.Client(api_key=api_key)
     last_err = ""
 
@@ -1226,47 +1297,27 @@ if submitted:
     elif not api_key_input:
         st.error("AI連携キーが設定されていません。サイドバーをご確認ください。")
     else:
-        with st.spinner("AIが食事を時間帯ごとにスマート分解・解析中..."):
-            res = analyze_meal_fast(cleaned_input, fallback_cat, api_key_input)
-            if "error" in res:
-                st.error(res["error"])
-            else:
-                meals_list = res.get("meals", [])
-                if not meals_list and "items" in res:
-                    meals_list = [res]
+        st.session_state.input_draft = ""
+        # バックグラウンド解析スレッドを起動（画面を離れたりブラウザを閉じても独立継続）
+        t = threading.Thread(
+            target=process_meal_background,
+            args=(cleaned_input, fallback_cat, api_key_input),
+            daemon=True
+        )
+        t.start()
 
-                now_str = datetime.now().strftime("%H:%M")
-                
-                for m_entry in meals_list:
-                    cat_raw = m_entry.get("category", fallback_cat)
-                    if "朝" in cat_raw:
-                        cat_final = "朝食"
-                    elif "昼" in cat_raw or "ランチ" in cat_raw:
-                        cat_final = "昼食"
-                    elif "夕" in cat_raw or "夜" in cat_raw or "晩" in cat_raw:
-                        cat_final = "夕食"
-                    else:
-                        cat_final = "間食"
+        # 画面を開いて待っているユーザーのために最大3秒待機（高速3.5-flash-liteなら通常1〜1.5秒で完了）
+        with st.spinner("AIが食事をスマート分解・解析中...（アプリを閉じて別アプリを見ていただいても裏で完了します 🚀）"):
+            for _ in range(15):
+                t.join(timeout=0.2)
+                if not t.is_alive():
+                    break
 
-                    summary_txt = m_entry.get("summary_text", "").strip()
-                    if not summary_txt:
-                        summary_txt = meal_text
-
-                    st.session_state.meals.append({
-                        "time": now_str,
-                        "category": cat_final,
-                        "input": summary_txt,
-                        "result": {
-                            "detected_category": cat_final,
-                            "items": m_entry.get("items", []),
-                            "total": m_entry.get("total", {}),
-                            "judgment": m_entry.get("judgment", "分析完了"),
-                            "comment": m_entry.get("comment", "")
-                        }
-                    })
-
-                st.session_state.input_draft = ""
-                st.rerun()
+        # 完了していれば即時反映、まだ裏で解析中の場合は通知
+        applied = check_and_apply_bg_results()
+        if not applied and t.is_alive():
+            st.toast("⚡ バックグラウンドで解析を継続しています。アプリを閉じて別アプリを見ていただいて大丈夫です！")
+        st.rerun()
 
 # -------------------------------------------------------------
 # 10. 朝昼晩ごとの区分け表示 ＆ 直近履歴
