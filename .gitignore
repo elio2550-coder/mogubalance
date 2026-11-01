@@ -1,0 +1,24 @@
+# 環境変数・APIキー（秘密金庫）
+.env
+.env.local
+*.env
+
+# 個人データ・食事履歴・身体データ（完全非公開）
+data/*.json
+
+# Streamlit固有の設定・秘密情報
+.streamlit/secrets.toml
+
+# Pythonキャッシュ
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 仮想環境
+venv/
+.venv/
+env/
+
+# OS固有の一時ファイル
+.DS_Store
+Thumbs.db

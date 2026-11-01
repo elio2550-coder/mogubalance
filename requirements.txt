@@ -1,0 +1,11 @@
+playwright>=1.40.0
+playwright-stealth>=1.0.6
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# モグバランス (MoguBalance) 依存ライブラリ
+streamlit>=1.30.0
+google-genai>=0.1.1
+google-generativeai>=0.8.0
+plotly>=5.18.0
+python-dotenv>=1.0.0
